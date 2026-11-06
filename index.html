@@ -1,0 +1,206 @@
+<!DOCTYPE html>
+<html lang="en-us">
+  <head>
+    <meta charset="utf-8">
+    <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+    <title>Word Infinity</title>
+    <link rel="icon" type="image/png" href="TemplateData/game-icon.png">
+    <style>
+      /* Word Infinity: portrait. Fixed window: no page scroll, no pinch or double-tap zoom, the canvas fits by JS. */
+      html, body {
+        margin: 0; padding: 0; width: 100%; height: 100%;
+        overflow: hidden; background: #1B2740; overscroll-behavior: none;
+        touch-action: none; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none;
+        -webkit-tap-highlight-color: transparent;
+      }
+      /* The blur is baked into the JPG (Tools/bake_art.py), never filter: blur() here. The image comes back off in the
+         createUnityInstance().then() handler below, or it would paint the letterbox bars all session (trap 14). */
+      #unity-container {
+        position: fixed; inset: 0;
+        background: #1B2740 url('TemplateData/loading-bg.jpg') center / cover no-repeat;
+      }
+      #unity-canvas { display: block; position: absolute; background: transparent !important; outline: none; }
+      #unity-loading-bar { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); display: none; z-index: 10; text-align: center; }
+      #unity-logo { position: relative; width: 180px; height: 180px; margin: 0 auto 12px; background: none; }
+      #unity-logo.gb-fallback { background: url('TemplateData/game-icon.png') center / contain no-repeat; }
+      #gb-tenant-logo { position: absolute; inset: 0; background-position: center; background-repeat: no-repeat; background-size: contain; opacity: 0; transition: opacity .25s ease; }
+      #gb-tenant-logo.gb-ready { opacity: 1; }
+      #gb-spinner { position: absolute; left: 50%; top: 50%; width: 44px; height: 44px; margin: -22px 0 0 -22px; border: 4px solid rgba(255,255,255,0.18); border-top-color: #F5A623; border-radius: 50%; animation: gb-spin 0.8s linear infinite; }
+      @keyframes gb-spin { to { transform: rotate(360deg); } }
+      #unity-progress-bar-empty { width: min(300px, 76vw); height: 18px; margin: 12px auto 0; background: #d9d9d9; border-radius: 9px; overflow: hidden; }
+      #unity-progress-bar-full { width: 0%; height: 100%; background: #F5A623; border-radius: 9px; transition: width 0.1s ease; }
+      #unity-progress-percent { color: #F2F2F2; font: 14px arial, sans-serif; margin-top: 6px; }
+      #unity-warning { position: absolute; left: 50%; top: 5%; transform: translate(-50%); background: white; padding: 10px; display: none; z-index: 20; }
+    </style>
+  </head>
+  <body>
+    <div id="unity-container">
+      <canvas id="unity-canvas" width=720 height=1280 tabindex="-1"></canvas>
+      <div id="unity-loading-bar">
+        <div id="unity-logo"><div id="gb-tenant-logo"></div><div id="gb-spinner"></div></div>
+        <div id="unity-progress-bar-empty"><div id="unity-progress-bar-full"></div></div>
+        <div id="unity-progress-percent">0%</div>
+      </div>
+      <div id="unity-warning"> </div>
+    </div>
+    <script>
+      var GB_BUILD = "1";
+
+      // ===== Loading icon: the game's own icon from /context, the built-in one after 4 s, the lookup keeps going to 30 s. =====
+      (function loadTenantIcon() {
+        var DEFAULT_API_BASE = "https://api.staging.g-b.store";
+        var DEFAULT_GAME_ID  = "WORD_INFINITY";
+        var SHOW_BUILTIN_AFTER_MS = 4000, GIVE_UP_AFTER_MS = 30000;
+        var spinner = document.querySelector("#gb-spinner"), target = document.querySelector("#gb-tenant-logo"), iconBox = document.querySelector("#unity-logo");
+        var builtinTimer = null;
+        function stopSpinner() { if (spinner && spinner.parentNode) spinner.parentNode.removeChild(spinner); }
+        function showBuiltin() { if (iconBox) iconBox.classList.add("gb-fallback"); stopSpinner(); }
+        function fallback() { clearTimeout(builtinTimer); showBuiltin(); }
+        try {
+          var q = new URLSearchParams(window.location.search);
+          var token = q.get("bootToken") || q.get("sessionToken") || q.get("token");
+          var tenantSlug = q.get("tenantSlug");
+          var apiBase = ((false && q.get("devApi")) || DEFAULT_API_BASE).replace(/\/+$/, "");
+          var gameId = q.get("gameId") || DEFAULT_GAME_ID;
+          if (!tenantSlug || !token) { fallback(); return; }
+          builtinTimer = setTimeout(showBuiltin, SHOW_BUILTIN_AFTER_MS);
+          var ctrl = ("AbortController" in window) ? new AbortController() : null;
+          var giveUp = setTimeout(function () { if (ctrl) ctrl.abort(); }, GIVE_UP_AFTER_MS);
+          fetch(apiBase + "/play/games/" + encodeURIComponent(gameId) + "/context?tenantSlug=" + encodeURIComponent(tenantSlug), {
+            method: "GET", headers: { "Authorization": "Bearer " + token }, signal: ctrl ? ctrl.signal : undefined
+          }).then(function (r) { return r.ok ? r.json() : null; }).then(function (data) {
+            clearTimeout(giveUp);
+            var c = data && data.customization;
+            // Per-game fields only: logoUrl / assets[] are tenant-wide and can be another game's art (trap 29).
+            var iconUrl = (c && typeof c.gameLogoUrl === "string" && c.gameLogoUrl) ? c.gameLogoUrl : (c && typeof c.gameBannerUrl === "string" && c.gameBannerUrl) ? c.gameBannerUrl : null;
+            if (!iconUrl || !target) { fallback(); return; }
+            var img = new Image();   // no crossOrigin (trap 27)
+            img.onload = function () {
+              clearTimeout(builtinTimer);
+              if (!target.parentNode) return;
+              target.style.backgroundImage = 'url("' + iconUrl.replace(/"/g, '%22') + '")';
+              target.classList.add("gb-ready");
+              stopSpinner();
+              setTimeout(function () { if (iconBox) iconBox.classList.remove("gb-fallback"); }, 300);
+            };
+            img.onerror = fallback;
+            img.src = iconUrl;
+          }).catch(function () { clearTimeout(giveUp); fallback(); });
+        } catch (e) { fallback(); }
+      })();
+
+      // ===== No pinch, double-tap or ctrl+wheel zoom; no page scroll (W7). iPhone audio session on the first tap (W2). =====
+      (function () {
+        var stop = function (e) { e.preventDefault(); };
+        ["gesturestart", "gesturechange", "gestureend", "dblclick"].forEach(function (t) { document.addEventListener(t, stop, { passive: false }); });
+        document.addEventListener("touchmove", stop, { passive: false });
+        document.addEventListener("wheel", function (e) { if (e.ctrlKey) e.preventDefault(); }, { passive: false });
+        document.addEventListener("keydown", function (e) { if ((e.ctrlKey || e.metaKey) && /^(\+|=|-|0)$/.test(e.key)) e.preventDefault(); });
+        document.addEventListener("pointerdown", function () { try { if (navigator.audioSession) navigator.audioSession.type = "playback"; } catch (e) {} }, { once: true, capture: true });
+      })();
+
+      var canvas = document.querySelector("#unity-canvas");
+
+      // ===== Which GameBull app view the game is in (gamebull-whitelabel GameHostOverlay; as PHOTO JIGSAW build 5) =====
+      // Portrait starts with the app's bar above the game frame, nothing over the game. Landscape, or the maximize button,
+      // removes the bar and floats Done (top left, about 66x48) and collapse (top right) over the frame. The game is not
+      // told, but removing the bar makes this window taller by the bar's height at the same width.
+      var query = new URLSearchParams(window.location.search);
+      var inApp = window.parent !== window || query.has("devApp");
+      var viewW = window.innerWidth, viewH = window.innerHeight, appExpanded = inApp && (window.innerWidth > window.innerHeight || query.has("devExpanded"));
+      function readView() {
+        if (!inApp) return;
+        var w = window.innerWidth, h = window.innerHeight, was = appExpanded;
+        if (Math.abs(w - viewW) > 1) appExpanded = w > h;
+        else if (h - viewH >= 40) appExpanded = true;
+        else if (viewH - h >= 40) appExpanded = false;
+        viewW = w; viewH = h;
+        if (was !== appExpanded) console.log("[WI-GB] app view: " + (appExpanded ? "expanded" : "with its bar") + " (" + w + "x" + h + ")");
+      }
+
+      // ===== One canvas shape rule for every screen of the game =====
+      // The client's UI scales with the window's width, their world (bowl, balls, background) with its height, so only
+      // this range of shapes keeps the two together; beyond it the window letterboxes. Never a per-screen scale.
+      // In the expanded view the top 48 px stay clear of the app's Done and collapse: their menu button and coins
+      // sit in those corners. The canvas then stays the same size as with the app's bar.
+      var MAX_ASPECT = 0.60, MIN_ASPECT = 0.52, APP_BUTTONS = 48;
+      function resizeCanvas() {
+        readView();
+        var availW = window.innerWidth, availH = window.innerHeight, w, h;
+        var band = appExpanded && availH > availW ? APP_BUTTONS : 0;
+        var usableH = availH - band, a = availW / usableH;
+        if (a > MAX_ASPECT)      { h = usableH; w = Math.round(h * MAX_ASPECT); }
+        else if (a < MIN_ASPECT) { w = availW; h = Math.round(w / MIN_ASPECT); }
+        else                     { w = availW; h = usableH; }
+        canvas.style.width  = w + "px";
+        canvas.style.height = h + "px";
+        canvas.style.left   = Math.round((availW - w) / 2) + "px";
+        canvas.style.top    = Math.round(band + (usableH - h) / 2) + "px";
+      }
+      window.addEventListener("resize", resizeCanvas);
+      resizeCanvas();
+
+      function setLoadProgress(p) {
+        var pct = Math.round(p * 100);
+        var full = document.querySelector("#unity-progress-bar-full"), txt = document.querySelector("#unity-progress-percent");
+        if (full) full.style.width = pct + "%";
+        if (txt) txt.innerText = pct + "%";
+      }
+
+      function unityShowBanner(msg, type) {
+        var banner = document.querySelector("#unity-warning");
+        function update() { banner.style.display = banner.children.length ? "block" : "none"; }
+        var div = document.createElement("div");
+        div.innerHTML = msg;
+        banner.appendChild(div);
+        if (type == "error") div.style = "background: red; padding: 10px;";
+        else {
+          if (type == "warning") div.style = "background: yellow; padding: 10px;";
+          setTimeout(function () { banner.removeChild(div); update(); }, 5000);
+        }
+        update();
+      }
+
+      // ?v= per build: Pages caches by URL and these file names never change (W19).
+      var buildUrl = "Build", qv = "?v=" + GB_BUILD;
+      var loaderUrl = buildUrl + "/wordinfinity.loader.js" + qv;
+      var config = {
+        arguments: [],
+        dataUrl: buildUrl + "/wordinfinity.data.unityweb" + qv,
+        frameworkUrl: buildUrl + "/wordinfinity.framework.js.unityweb" + qv,
+        codeUrl: buildUrl + "/wordinfinity.wasm.unityweb" + qv,
+        streamingAssetsUrl: "StreamingAssets",
+        companyName: "Digimight",
+        productName: "Word Infinity",
+        productVersion: "1.20",
+        showBanner: unityShowBanner,
+        matchWebGLToCanvasSize: true,
+      };
+
+      document.querySelector("#unity-loading-bar").style.display = "block";
+
+      var script = document.createElement("script");
+      script.src = loaderUrl;
+      script.onload = function () {
+        createUnityInstance(canvas, config, setLoadProgress).then(function (unityInstance) {
+          window.unityInstance = unityInstance;
+          setLoadProgress(1);
+          // Safari keeps painting hidden loading elements: remove each one.
+          ["#gb-spinner", "#gb-tenant-logo", "#unity-logo", "#unity-progress-bar-full", "#unity-progress-bar-empty", "#unity-progress-percent", "#unity-loading-bar"].forEach(function (sel) {
+            var el = document.querySelector(sel);
+            if (!el) return;
+            el.style.display = "none"; el.style.backgroundImage = "none";
+            if (el.parentNode) el.parentNode.removeChild(el);
+          });
+          // The backdrop is a loading backdrop: this element also paints the letterbox bars (trap 14).
+          var container = document.querySelector("#unity-container");
+          if (container) container.style.background = "#1B2740";
+          resizeCanvas();
+          try { window.parent.postMessage({ type: "game:ready" }, "*"); } catch (e) {}
+        }).catch(function (message) { unityShowBanner(String(message), "error"); });
+      };
+      document.body.appendChild(script);
+    </script>
+  </body>
+</html>
